@@ -652,6 +652,49 @@ M.grep_lgrep = function(_, opts)
   end
 end
 
+local function custom_rg_toggle(_, opts, toggle_opts)
+  -- 'MODULE' is set on 'grep' and 'live_grep' calls
+  assert(opts.__MODULE__
+    and type(opts.__MODULE__.grep) == 'function'
+    or type(opts.__MODULE__.live_grep) == 'function')
+
+  local prompt = nil
+  local rg_opts = opts.rg_opts or opts.__call_opts.rg_opts
+  local is_toggled = not opts.__is_toggled
+  if not opts.__is_toggled then
+    -- was not toggled, toggle things on
+    prompt = toggle_opts.toggle_prompt
+    rg_opts = rg_opts.." "..(toggle_opts.toggle_rg_opts or "")
+    is_toggled = true
+  end
+
+  local o = vim.tbl_extend("keep", {
+      search = false,
+      resume = true,
+      resume_search_default = '',
+      __is_toggled = is_toggled,
+      rg_opts = rg_opts,
+    }, opts.__call_opts or {})
+
+  -- we may intentionally set prompt to nil
+  -- but that could get overriden if we vim.tbl_extend
+  -- above so instead we set it manually here.
+  o.prompt = prompt
+
+  -- 'fn_reload' is set only on 'live_grep' calls
+  if opts.fn_reload then
+    opts.__MODULE__.live_grep(o)
+  else
+    opts.__MODULE__.grep(o)
+  end
+end
+
+M.make_rg_toggle = function (toggle_opts)
+  return function (_, opts)
+    custom_rg_toggle(_, opts, toggle_opts)
+  end
+end
+
 M.sym_lsym = function(_, opts)
 
   assert(opts.__MODULE__
