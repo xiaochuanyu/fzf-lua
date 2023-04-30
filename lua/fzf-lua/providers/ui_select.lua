@@ -6,6 +6,7 @@ local actions = require "fzf-lua.actions"
 local M = {}
 
 local _opts = nil
+local _opts_once = nil
 local _old_ui_select = nil
 
 M.is_registered = function()
@@ -21,7 +22,7 @@ M.deregister = function(_, silent, noclear)
   end
   vim.ui.select = _old_ui_select
   _old_ui_select = nil
-  -- do not empty _opts incase when
+  -- do not empty _opts in case when
   -- resume from `lsp_code_actions`
   if not noclear then
     _opts = nil
@@ -29,7 +30,9 @@ M.deregister = function(_, silent, noclear)
   return true
 end
 
-M.register = function(opts, silent)
+M.register = function(opts, silent, opts_once)
+  -- save "once" opts sent from lsp_code_actions
+  _opts_once = opts_once
   if vim.ui.select == M.ui_select then
     -- already registered
     if not silent then
@@ -41,6 +44,11 @@ M.register = function(opts, silent)
   _old_ui_select = vim.ui.select
   vim.ui.select = M.ui_select
   return true
+end
+
+M.accept_item = function(selected, o)
+  local idx = selected and tonumber(selected[1]:match("^(%d+).")) or nil
+  o._on_choice(idx and o._items[idx] or nil, idx)
 end
 
 M.ui_select = function(items, opts, on_choice)
@@ -65,7 +73,6 @@ M.ui_select = function(items, opts, on_choice)
     kind = "quickfix",
     title = "Mark `mymainmenu` as defined global."
   } } ]]
-
   -- exit visual mode if needed
   local mode = vim.api.nvim_get_mode()
   if not mode.mode:match("^n") then
@@ -79,39 +86,32 @@ M.ui_select = function(items, opts, on_choice)
         opts.format_item and opts.format_item(e) or tostring(e)))
   end
 
-  local prompt = opts.prompt
-  if not prompt then
-      prompt =  "Select one of:"
-  end
+  local prompt = opts.prompt or "Select one of:"
 
   _opts = _opts or {}
-  _opts.fzf_opts = {
-    ['--no-multi']        = '',
-    ['--prompt']          = prompt:gsub(":%s?$", "> "),
-    ['--preview-window']  = 'hidden:right:0',
-  }
+  _opts.fzf_opts = vim.tbl_extend("keep", _opts.fzf_opts or {}, {
+    ["--no-multi"]       = "",
+    ["--prompt"]         = prompt:gsub(":%s?$", "> "),
+    ["--preview-window"] = "hidden:right:0",
+  })
 
   -- save items so we can access them from the action
   _opts._items = items
   _opts._on_choice = on_choice
+  _opts._ui_select = opts
 
-  _opts.actions = vim.tbl_deep_extend("keep", _opts.actions or {},
-    {
-      ["default"] = function(selected, o)
-        local idx = selected and tonumber(selected[1]:match("^(%d+).")) or nil
-        o._on_choice(idx and o._items[idx] or nil, idx)
-      end
-    })
+  _opts.actions = vim.tbl_deep_extend("keep",
+    _opts.actions or {}, { ["default"] = M.accept_item })
 
-  config.set_action_helpstr(_opts.actions['default'], "accept-item")
+  config.set_action_helpstr(M.accept_item, "accept-item")
 
-  _opts.fn_selected = function(selected)
-    config.set_action_helpstr(_opts.actions['default'], nil)
+  _opts.fn_selected = function(selected, o)
+    config.set_action_helpstr(_opts.actions["default"], nil)
 
     if not selected then
       on_choice(nil, nil)
     else
-      actions.act(_opts.actions, selected, _opts)
+      actions.act(o.actions, selected, o)
     end
 
     if _opts.post_action_cb then
@@ -119,8 +119,19 @@ M.ui_select = function(items, opts, on_choice)
     end
   end
 
-  core.fzf_exec(entries, _opts)
+  -- was this triggered by lsp_code_actions?
+  local opts_once = _opts_once
+  if _opts_once then
+    -- merge and clear the once opts sent from lsp_code_actions.
+    -- We also override actions to guarantee a single default
+    -- action, otherwise selected[1] will be empty due to
+    -- multiple keybinds trigger, sending `--expect` to fzf
+    _opts_once.actions = _opts.actions
+    opts_once = vim.tbl_deep_extend("keep", _opts_once, _opts)
+    _opts_once = nil
+  end
 
+  core.fzf_exec(entries, opts_once or _opts)
 end
 
 return M

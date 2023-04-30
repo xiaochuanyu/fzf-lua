@@ -11,7 +11,7 @@ local convert_diagnostic_type = function(severity)
   if type(severity) == "string" and not tonumber(severity) then
     -- make sure that e.g. error is uppercased to Error
     return vim.diagnostic and vim.diagnostic.severity[severity:upper()] or
-      vim.lsp.protocol.DiagnosticSeverity[severity:gsub("^%l", string.upper)]
+        vim.lsp.protocol.DiagnosticSeverity[severity:gsub("^%l", string.upper)]
   else
     -- otherwise keep original value, incl. nil
     return tonumber(severity)
@@ -37,6 +37,8 @@ M.diagnostics = function(opts)
   -- required for relative paths presentation
   if not opts.cwd or #opts.cwd == 0 then
     opts.cwd = vim.loop.cwd()
+  else
+    opts.cwd_only = true
   end
 
   if not vim.diagnostic then
@@ -54,7 +56,7 @@ M.diagnostics = function(opts)
     ["Info"]  = { severity = 3, default = "I", sign = "DiagnosticSignInfo" },
     ["Hint"]  = { severity = 4, default = "H", sign = "DiagnosticSignHint" },
   } or {
-    -- At one point or another wdefault = "E", e'll drop support for the old LSP diag
+    -- At one point or another, we'll drop support for the old LSP diag
     ["Error"] = { severity = 1, default = "E", sign = "LspDiagnosticsSignError" },
     ["Warn"]  = { severity = 2, default = "W", sign = "LspDiagnosticsSignWarning" },
     ["Info"]  = { severity = 3, default = "I", sign = "LspDiagnosticsSignInformation" },
@@ -68,7 +70,8 @@ M.diagnostics = function(opts)
     -- can be empty when config set to (#480):
     -- vim.diagnostic.config({ signs = false })
     if vim.tbl_isempty(sign_def) then sign_def = nil end
-    opts.__signs[v.severity].text = sign_def and vim.trim(sign_def[1].text) or v.default
+    opts.__signs[v.severity].text = sign_def and sign_def[1].text and
+        vim.trim(sign_def[1].text) or v.default
     opts.__signs[v.severity].texthl = sign_def and sign_def[1].texthl or nil
     if opts.signs and opts.signs[k] and opts.signs[k].text then
       opts.__signs[v.severity].text = opts.signs[k].text
@@ -92,7 +95,8 @@ M.diagnostics = function(opts)
   local diag_opts = { severity = {}, namespace = opts.namespace }
   if opts.severity_only ~= nil then
     if opts.severity_limit ~= nil or opts.severity_bound ~= nil then
-      utils.warn("Invalid severity parameters. Both a specific severity and a limit/bound is not allowed")
+      utils.warn("Invalid severity parameters." ..
+        " Both a specific severity and a limit/bound is not allowed")
       return {}
     end
     diag_opts.severity = opts.severity_only
@@ -107,9 +111,9 @@ M.diagnostics = function(opts)
 
   local curbuf = vim.api.nvim_get_current_buf()
   local diag_results = vim.diagnostic and
-    vim.diagnostic.get(not opts.diag_all and curbuf or nil, diag_opts) or
-    opts.diag_all and vim.lsp.diagnostic.get_all() or
-    {[curbuf] = vim.lsp.diagnostic.get(curbuf, opts.client_id)}
+      vim.diagnostic.get(not opts.diag_all and curbuf or nil, diag_opts) or
+      opts.diag_all and vim.lsp.diagnostic.get_all() or
+      { [curbuf] = vim.lsp.diagnostic.get(curbuf, opts.client_id) }
 
   local has_diags = false
   if vim.diagnostic then
@@ -122,16 +126,19 @@ M.diagnostics = function(opts)
     end
   end
   if not has_diags then
-    utils.info(string.format('No %s found', 'diagnostics'))
+    utils.info(string.format("No %s found", "diagnostics"))
     return
   end
 
   local preprocess_diag = function(diag, bufnr)
     bufnr = bufnr or diag.bufnr
+    if not vim.api.nvim_buf_is_valid(bufnr) then
+      return nil
+    end
     local filename = vim.api.nvim_buf_get_name(bufnr)
     -- pre vim.diagnostic (vim.lsp.diagnostic)
     -- has 'start|finish' instead of 'end_col|end_lnum'
-    local start = diag.range and diag.range['start']
+    local start = diag.range and diag.range["start"]
     -- local finish = diag.range and diag.range['end']
     local row = diag.lnum or start.line
     local col = diag.col or start.character
@@ -147,8 +154,8 @@ M.diagnostics = function(opts)
     return buffer_diag
   end
 
-  local contents = function (fzf_cb)
-    coroutine.wrap(function ()
+  local contents = function(fzf_cb)
+    coroutine.wrap(function()
       local co = coroutine.running()
 
       local function process_diagnostics(diags, bufnr)
@@ -156,10 +163,13 @@ M.diagnostics = function(opts)
           -- workspace diagnostics may include
           -- empty tables for unused buffers
           if not vim.tbl_isempty(diag) and filter_diag_severity(opts, diag.severity) then
-            -- wrap with 'vim.scheudle' or calls to vim.{fn|api} fail:
+            -- wrap with 'vim.schedule' or calls to vim.{fn|api} fail:
             -- E5560: vimL function must not be called in a lua loop callback
             vim.schedule(function()
               local diag_entry = preprocess_diag(diag, bufnr)
+              if diag_entry == nil then
+                coroutine.resume(co)
+              end
               local entry = make_entry.lcol(diag_entry, opts)
               entry = make_entry.file(entry, opts)
               if not entry then
@@ -174,7 +184,7 @@ M.diagnostics = function(opts)
                     icon = utils.ansi_from_hl(value.texthl, icon)
                   end
                   entry = string.format("%s%s%s%s",
-                    icon, opts.icon_padding or '', utils.nbsp, entry)
+                    icon, opts.icon_padding or "", utils.nbsp, entry)
                 end
                 fzf_cb(entry, function() coroutine.resume(co) end)
               end
@@ -198,7 +208,7 @@ M.diagnostics = function(opts)
     end)()
   end
 
-  opts = core.set_header(opts, opts.headers or {"cwd"})
+  opts = core.set_header(opts, opts.headers or { "cwd" })
   opts = core.set_fzf_field_index(opts)
   return core.fzf_exec(contents, opts)
 end

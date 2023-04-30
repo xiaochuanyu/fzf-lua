@@ -1,6 +1,7 @@
 local core = require "fzf-lua.core"
 local path = require "fzf-lua.path"
 local utils = require "fzf-lua.utils"
+local shell = require "fzf-lua.shell"
 local config = require "fzf-lua.config"
 local make_entry = require "fzf-lua.make_entry"
 
@@ -14,7 +15,7 @@ local UPDATE_STATE = function()
     curtabidx = vim.fn.tabpagenr(),
     curtab = vim.api.nvim_win_get_tabpage(0),
     curbuf = vim.api.nvim_get_current_buf(),
-    prevbuf = vim.fn.bufnr('#'),
+    prevbuf = vim.fn.bufnr("#"),
     buflist = vim.api.nvim_list_bufs(),
     bufmap = (function()
       local map = {}
@@ -26,9 +27,17 @@ local UPDATE_STATE = function()
   }
 end
 
-local filter_buffers = function(opts, unfiltered)
+local UPDATE_STATE_IF_NOT_FZF = function()
+  -- do not update if we're called from the main fzf window as this would
+  -- cause incorrect current/previous tab markers when wiping buffers with skim
+  local wininfo = vim.fn.getwininfo(vim.api.nvim_get_current_win())[1]
+  if wininfo.terminal ~= 1 then
+    UPDATE_STATE()
+  end
+end
 
-  if type(unfiltered) == 'function' then
+local filter_buffers = function(opts, unfiltered)
+  if type(unfiltered) == "function" then
     unfiltered = unfiltered()
   end
 
@@ -68,6 +77,8 @@ local filter_buffers = function(opts, unfiltered)
     end
     if opts.cwd_only and not path.is_relative(vim.api.nvim_buf_get_name(b), vim.loop.cwd()) then
       excluded[b] = true
+    elseif opts.cwd and not path.is_relative(vim.api.nvim_buf_get_name(b), opts.cwd) then
+      excluded[b] = true
     end
     return not excluded[b]
   end, unfiltered)
@@ -75,21 +86,22 @@ local filter_buffers = function(opts, unfiltered)
   return bufnrs, excluded
 end
 
-local populate_buffer_entries = function(opts, bufnrs, tabnr)
+local populate_buffer_entries = function(opts, bufnrs, tabh)
   local buffers = {}
   for _, bufnr in ipairs(bufnrs) do
-    local flag = (bufnr == __STATE.curbuf and '%') or
-                 (bufnr == __STATE.prevbuf and '#') or ' '
+    local flag = (bufnr == __STATE.curbuf and "%") or
+        (bufnr == __STATE.prevbuf and "#") or " "
 
     local element = {
       bufnr = bufnr,
       flag = flag,
       info = vim.fn.getbufinfo(bufnr)[1],
+      readonly = vim.api.nvim_buf_get_option(bufnr, "readonly")
     }
 
     -- get the correct lnum for tabbed buffers
-    if tabnr then
-      local winid = utils.winid_from_tab_buf(tabnr, bufnr)
+    if tabh then
+      local winid = utils.winid_from_tabh(tabh, bufnr)
       if winid then
         element.info.lnum = vim.api.nvim_win_get_cursor(winid)[1]
       end
@@ -98,24 +110,40 @@ local populate_buffer_entries = function(opts, bufnrs, tabnr)
     table.insert(buffers, element)
   end
   if opts.sort_lastused then
+    -- switching buffers and opening 'buffers' in quick succession
+    -- can lead to incorrect sort as 'lastused' isn't updated fast
+    -- enough (neovim bug?), this makes sure the current buffer is
+    -- always on top (#646)
+    -- Hopefully this gets solved before the year 2100
+    -- DON'T FORCE ME TO UPDATE THIS HACK NEOVIM LOL
+    local future = os.time({ year = 2100, month = 1, day = 1, hour = 0, minute = 00 })
+    local get_unixtime = function(buf)
+      if buf.flag == "%" then
+        return future
+      elseif buf.flag == "#" then
+        return future - 1
+      else
+        return buf.info.lastused
+      end
+    end
     table.sort(buffers, function(a, b)
-      return a.info.lastused > b.info.lastused
+      return get_unixtime(a) > get_unixtime(b)
     end)
   end
   return buffers
 end
 
 
-local function gen_buffer_entry(opts, buf, hl_curbuf)
+local function gen_buffer_entry(opts, buf, hl_curbuf, cwd)
   -- local hidden = buf.info.hidden == 1 and 'h' or 'a'
-  local hidden = ''
-  local readonly = vim.api.nvim_buf_get_option(buf.bufnr, 'readonly') and '=' or ' '
-  local changed = buf.info.changed == 1 and '+' or ' '
+  local hidden = ""
+  local readonly = buf.readonly and "=" or " "
+  local changed = buf.info.changed == 1 and "+" or " "
   local flags = hidden .. readonly .. changed
-  local leftbr = utils.ansi_codes.clear('[')
-  local rightbr = utils.ansi_codes.clear(']')
-  local bufname = #buf.info.name>0 and
-      path.relative(buf.info.name, vim.loop.cwd()) or
+  local leftbr = utils.ansi_codes.clear("[")
+  local rightbr = utils.ansi_codes.clear("]")
+  local bufname = #buf.info.name > 0 and
+      path.relative(buf.info.name, cwd or vim.loop.cwd()) or
       utils.nvim_buf_get_name(buf.bufnr, buf.info)
   if opts.filename_only then
     bufname = path.basename(bufname)
@@ -123,24 +151,24 @@ local function gen_buffer_entry(opts, buf, hl_curbuf)
   -- replace $HOME with '~' for paths outside of cwd
   bufname = path.HOME_to_tilde(bufname)
   -- add line number
-  bufname = ("%s:%s"):format(bufname, buf.info.lnum>0 and buf.info.lnum or  "")
-  if buf.flag == '%' then
+  bufname = ("%s:%s"):format(bufname, buf.info.lnum > 0 and buf.info.lnum or "")
+  if buf.flag == "%" then
     flags = utils.ansi_codes.red(buf.flag) .. flags
     if hl_curbuf then
       -- no header line, highlight current buffer
-      leftbr = utils.ansi_codes.green('[')
-      rightbr = utils.ansi_codes.green(']')
+      leftbr = utils.ansi_codes.green("[")
+      rightbr = utils.ansi_codes.green("]")
       bufname = utils.ansi_codes.green(bufname)
     end
-  elseif buf.flag == '#' then
+  elseif buf.flag == "#" then
     flags = utils.ansi_codes.cyan(buf.flag) .. flags
   else
     flags = utils.nbsp .. flags
   end
   local bufnrstr = string.format("%s%s%s", leftbr,
     utils.ansi_codes.yellow(string.format(buf.bufnr)), rightbr)
-  local buficon = ''
-  local hl = ''
+  local buficon = ""
+  local hl = ""
   if opts.file_icons then
     if utils.is_term_bufname(buf.info.name) then
       -- get shell-like icon for terminal buffers
@@ -155,7 +183,7 @@ local function gen_buffer_entry(opts, buf, hl_curbuf)
     end
   end
   local item_str = string.format("%s%s%s%s%s%s%s%s",
-    utils._if(opts._prefix, opts._prefix, ''),
+    utils._if(opts._prefix, opts._prefix, ""),
     string.format("%-32s", bufnrstr),
     utils.nbsp,
     flags,
@@ -166,32 +194,44 @@ local function gen_buffer_entry(opts, buf, hl_curbuf)
   return item_str
 end
 
-
 M.buffers = function(opts)
-
   opts = config.normalize_opts(opts, config.globals.buffers)
   if not opts then return end
 
-  -- get current tab/buffer/previos buffer
-  -- save as a func ref for resume to reuse
-  opts.fn_pre_fzf = UPDATE_STATE
+  opts.__fn_reload = opts.__fn_reload or function(_)
+    return function(cb)
+      local filtered = filter_buffers(opts, __STATE.buflist)
 
-  local contents = function(cb)
-
-    local filtered = filter_buffers(opts, __STATE.buflist)
-
-    if next(filtered) then
-      local buffers = populate_buffer_entries(opts, filtered)
-      for _, bufinfo in pairs(buffers) do
-        cb(gen_buffer_entry(opts, bufinfo, not opts.sort_lastused))
+      if next(filtered) then
+        local buffers = populate_buffer_entries(opts, filtered)
+        for _, bufinfo in pairs(buffers) do
+          local ok, entry = pcall(gen_buffer_entry, opts, bufinfo, not opts.sort_lastused)
+          assert(ok and entry)
+          cb(entry)
+        end
       end
+      cb(nil)
     end
-    cb(nil)
   end
 
-  opts.fzf_opts['--header-lines'] =
-    (not opts.ignore_current_buffer and opts.sort_lastused) and '1'
+  -- build the "reload" cmd and remove '-- {+}' from the initial cmd
+  local reload, id = shell.reload_action_cmd(opts, "{+}")
+  local contents = reload:gsub("%-%-%s+{%+}$", "")
 
+  -- get current tab/buffer/previous buffer
+  -- save as a func ref for resume to reuse
+  opts._fn_pre_fzf = function()
+    shell.set_protected(id)
+    UPDATE_STATE_IF_NOT_FZF()
+  end
+
+  if opts.fzf_opts["--header-lines"] == nil then
+    opts.fzf_opts["--header-lines"] =
+        (not opts.ignore_current_buffer and opts.sort_lastused) and "1"
+  end
+
+  opts = core.set_header(opts, opts.headers or { "actions", "cwd" })
+  opts = core.convert_reload_actions(reload, opts)
   opts = core.set_fzf_field_index(opts)
 
   core.fzf_exec(contents, opts)
@@ -239,23 +279,23 @@ M.buffer_lines = function(opts)
         buficon = utils.ansi_codes[hl](buficon)
       end
     end
-    if not bufname or #bufname==0 then
+    if not bufname or #bufname == 0 then
       bufname = utils.nvim_buf_get_name(bufnr)
     end
     for l, text in ipairs(data) do
       table.insert(items, ("[%s]%s%s%s%s:%s: %s"):format(
         utils.ansi_codes.yellow(tostring(bufnr)),
         utils.nbsp,
-        buficon or '',
-        buficon and utils.nbsp or '',
+        buficon or "",
+        buficon and utils.nbsp or "",
         utils.ansi_codes.magenta(bufname),
         utils.ansi_codes.green(tostring(l)),
         text))
     end
   end
 
-  if opts.search and #opts.search>0 then
-    opts.fzf_opts['--query'] = vim.fn.shellescape(opts.search)
+  if opts.search and #opts.search > 0 then
+    opts.fzf_opts["--query"] = vim.fn.shellescape(opts.search)
   end
 
   opts = core.set_fzf_field_index(opts, 3, opts._is_skim and "{}" or "{..-2}")
@@ -264,11 +304,8 @@ M.buffer_lines = function(opts)
 end
 
 M.tabs = function(opts)
-
   opts = config.normalize_opts(opts, config.globals.tabs)
   if not opts then return end
-
-  opts.fn_pre_fzf = UPDATE_STATE
 
   opts._list_bufs = function()
     local res = {}
@@ -287,43 +324,104 @@ M.tabs = function(opts)
     return res
   end
 
-  local contents = function(cb)
+  opts.__fn_reload = opts.__fn_reload or function(_)
+    -- we do not return the populate function with cb directly to avoid
+    -- E5560: nvim_exec must not be called in a lua loop callback
+    local entries = {}
+    local populate = function(cb)
+      opts._tab_to_buf = {}
 
-    opts._tab_to_buf = {}
+      local filtered, excluded = filter_buffers(opts, opts._list_bufs)
+      if not next(filtered) then return end
 
-    local filtered, excluded = filter_buffers(opts, opts._list_bufs)
-    if not next(filtered) then return end
-
-    -- remove the filtered-out buffers
-    for b, _ in pairs(excluded) do
-      for _, bufnrs in pairs(opts._tab_to_buf) do
-        bufnrs[b] = nil
+      -- remove the filtered-out buffers
+      for b, _ in pairs(excluded) do
+        for _, bufnrs in pairs(opts._tab_to_buf) do
+          bufnrs[b] = nil
+        end
       end
+
+      for t, bufnrs in pairs(opts._tab_to_buf) do
+        local tab_cwd = vim.fn.getcwd(-1, t)
+
+        local opt_hl = function(k, default_msg, default_hl)
+          local hl = default_hl
+          local msg = default_msg and default_msg(opts[k]) or opts[k]
+          if type(opts[k]) == "table" then
+            if type(opts[k][1]) == "function" then
+              msg = opts[k][1](t, t == __STATE.curtabidx)
+            elseif type(opts[k][1]) == "string" then
+              msg = default_msg(opts[k][1])
+            else
+              msg = default_msg("Tab")
+            end
+            if type(opts[k][2]) == "string" then
+              hl = function(s)
+                return utils.ansi_from_hl(opts[k][2], s);
+              end
+            end
+          elseif type(opts[k]) == "function" then
+            msg = opts[k](t, t == __STATE.curtabidx)
+          end
+          return msg, hl
+        end
+
+        local title, fn_title_hl = opt_hl("tab_title",
+          function(s)
+            return string.format("%s%s#%d%s", s, utils.nbsp, t,
+              (vim.loop.cwd() == tab_cwd and ""
+                or string.format(": %s", path.HOME_to_tilde(tab_cwd))))
+          end,
+          utils.ansi_codes.blue)
+
+        local marker, fn_marker_hl = opt_hl("tab_marker",
+          function(s) return s end,
+          function(s)
+            return utils.ansi_codes.blue(utils.ansi_codes.bold(s));
+          end)
+
+        if not opts.current_tab_only then
+          cb(string.format("%d)%s%s\t%s", t, utils.nbsp,
+            fn_title_hl(title),
+            (t == __STATE.curtabidx) and fn_marker_hl(marker) or ""))
+        end
+
+        local bufnrs_flat = {}
+        for b, _ in pairs(bufnrs) do
+          table.insert(bufnrs_flat, b)
+        end
+
+        opts.sort_lastused = false
+        opts._prefix = ("%d)%s%s%s"):format(t, utils.nbsp, utils.nbsp, utils.nbsp)
+        local tabh = vim.api.nvim_list_tabpages()[t]
+        local buffers = populate_buffer_entries(opts, bufnrs_flat, tabh)
+        for _, bufinfo in pairs(buffers) do
+          cb(gen_buffer_entry(opts, bufinfo, false, tab_cwd))
+        end
+      end
+      cb(nil)
     end
-
-    for t, bufnrs in pairs(opts._tab_to_buf) do
-
-      cb(("%d)%s%s\t%s"):format(t, utils.nbsp,
-        utils.ansi_codes.blue("%s%s#%d"):format(opts.tab_title, utils.nbsp, t),
-          (t==__STATE.curtabidx) and
-          utils.ansi_codes.blue(utils.ansi_codes.bold(opts.tab_marker)) or ''))
-
-      local bufnrs_flat = {}
-      for b, _ in pairs(bufnrs) do
-        table.insert(bufnrs_flat, b)
+    populate(function(e)
+      if e then
+        table.insert(entries, e)
       end
-
-      opts.sort_lastused = false
-      opts._prefix = ("%d)%s%s%s"):format(t, utils.nbsp, utils.nbsp, utils.nbsp)
-      local tabnr = vim.api.nvim_list_tabpages()[t]
-      local buffers = populate_buffer_entries(opts, bufnrs_flat, tabnr)
-      for _, bufinfo in pairs(buffers) do
-        cb(gen_buffer_entry(opts, bufinfo, false))
-      end
-    end
-    cb(nil)
+    end)
+    return entries
   end
 
+  -- build the "reload" cmd and remove '-- {+}' from the initial cmd
+  local reload, id = shell.reload_action_cmd(opts, "{+}")
+  local contents = reload:gsub("%-%-%s+{%+}$", "")
+
+  -- get current tab/buffer/previous buffer
+  -- save as a func ref for resume to reuse
+  opts._fn_pre_fzf = function()
+    shell.set_protected(id)
+    UPDATE_STATE_IF_NOT_FZF()
+  end
+
+  opts = core.set_header(opts, opts.headers or { "actions", "cwd" })
+  opts = core.convert_reload_actions(reload, opts)
   opts = core.set_fzf_field_index(opts, 3, "{}")
 
   core.fzf_exec(contents, opts)

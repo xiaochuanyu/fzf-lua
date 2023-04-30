@@ -8,7 +8,7 @@ trap 'echo "EXIT detected with exit status $?"' EXIT
 TEMPDIR=$(dirname $(mktemp -u))
 BASEDIR=$(cd "$(dirname "$0")" ; pwd -P)
 
-nvim_bin=nvim
+nvim_bin=${NVIM:-nvim}
 plug_name=fzf-lua
 plug_dir="${BASEDIR}/../../${plug_name}"
 tmp_dir="${TEMPDIR}/${plug_name}.tmp"
@@ -23,20 +23,19 @@ download_plugin() {
     repo="https://github.com/${1}/${2}"
     folder="${tmp_rtp}/${2}"
     if [ ! -d $folder ]; then
-        echo "Downloading '${repo}' into '${folder}..."
+        echo "Downloading '${repo}' into ${folder}..."
         git clone --depth 1 ${repo} ${folder}
     else
-        echo "Updating '${repo}'..."
+        echo "Updating '${repo}' in ${folder}..."
         git -C "${folder}" pull --rebase
     fi
 }
 
-# if [ "$#" -ne 3 ]; then
-#     usage;
-#     exit 1
-# fi
+if [ "${1:-}" = "reset" ]; then
+    rm -rf ${tmp_dir}
+fi
 
-download_plugin "kyazdani42" "nvim-web-devicons" 
+download_plugin "nvim-tree" "nvim-web-devicons"
 
 # if exists, link to local folder so we can test local changes
 if [ -d "${plug_dir}" ]; then
